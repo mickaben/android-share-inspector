@@ -12,9 +12,13 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import java.net.HttpURLConnection
+import java.net.URL
 
 class MainActivity : Activity() {
     private lateinit var reportView: TextView
+    private lateinit var resolveButton: Button
+    private var baseReport: String = ""
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -34,6 +38,11 @@ class MainActivity : Activity() {
             setPadding(24, 24, 24, 24)
         }
 
+        resolveButton = Button(this).apply {
+            text = "Resolve shared URL"
+            setOnClickListener { resolveSharedUrl() }
+        }
+
         val copy = Button(this).apply {
             text = "Copy report"
             setOnClickListener {
@@ -48,6 +57,7 @@ class MainActivity : Activity() {
         }
 
         val scroll = ScrollView(this).apply { addView(reportView) }
+        root.addView(resolveButton)
         root.addView(copy)
         root.addView(scroll, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
@@ -59,7 +69,8 @@ class MainActivity : Activity() {
 
     private fun renderIntent(i: Intent?) {
         if (i == null) {
-            reportView.text = "No intent received."
+            baseReport = "No intent received."
+            reportView.text = baseReport
             return
         }
 
@@ -120,7 +131,74 @@ class MainActivity : Activity() {
             }
         }
 
-        reportView.text = out.toString()
+        baseReport = out.toString()
+        reportView.text = baseReport
+    }
+
+    private fun resolveSharedUrl() {
+        val text = intent?.getStringExtra(Intent.EXTRA_TEXT)?.trim()
+        val startUrl = text?.split(Regex("\\s+"))?.firstOrNull { it.startsWith("http://") || it.startsWith("https://") }
+        if (startUrl == null) {
+            reportView.text = "$baseReport\n\nRESOLUTION\nNo HTTP(S) URL found in EXTRA_TEXT."
+            return
+        }
+
+        resolveButton.isEnabled = false
+        resolveButton.text = "Resolving..."
+        reportView.text = "$baseReport\n\nRESOLUTION\nResolving $startUrl ..."
+
+        Thread {
+            val result = resolveRedirectChain(startUrl)
+            runOnUiThread {
+                reportView.text = "$baseReport\n\nRESOLUTION\n$result"
+                resolveButton.isEnabled = true
+                resolveButton.text = "Resolve shared URL"
+            }
+        }.start()
+    }
+
+    private fun resolveRedirectChain(startUrl: String): String {
+        val out = StringBuilder()
+        var current = startUrl
+        val seen = linkedSetOf<String>()
+
+        return try {
+            for (hop in 0 until 12) {
+                if (!seen.add(current)) {
+                    out.appendLine("loop detected: $current")
+                    break
+                }
+
+                val conn = (URL(current).openConnection() as HttpURLConnection).apply {
+                    instanceFollowRedirects = false
+                    requestMethod = "GET"
+                    connectTimeout = 10000
+                    readTimeout = 10000
+                    setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android) ShareInspector/0.2")
+                    setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                }
+
+                val code = conn.responseCode
+                val location = conn.getHeaderField("Location")
+                out.appendLine("hop[$hop]")
+                out.appendLine("  status=$code")
+                out.appendLine("  url=$current")
+                out.appendLine("  location=${location ?: "(none)"}")
+                conn.disconnect()
+
+                if (code in 300..399 && !location.isNullOrBlank()) {
+                    current = URL(URL(current), location).toExternalForm()
+                } else {
+                    out.appendLine("FINAL_URL=$current")
+                    out.appendLine("FINAL_STATUS=$code")
+                    break
+                }
+            }
+            out.toString()
+        } catch (e: Exception) {
+            out.appendLine("ERROR=${e.javaClass.name}: ${e.message}")
+            out.toString()
+        }
     }
 
     private fun formatValue(value: Any?): String = when (value) {
